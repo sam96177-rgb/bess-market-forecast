@@ -7,12 +7,40 @@
 # builder, backtest output, UI). Keeping the two separate lets us fix
 # misleading source naming (see afrr_pos/afrr_neg below) without touching
 # raw data, which is meant to stay immutable.
+#
+# `dst_convention` — verified empirically against each market's real data
+# on the 2026-03-29 spring-forward day, because the two markets do NOT
+# follow the same rule:
+#   - "variable_period_count": the day genuinely has fewer/more periods on
+#     a DST transition day (23h -> 92 quarter-hours; 25h -> 100). Confirmed
+#     against real ENTSO-E day-ahead prices, which had exactly 92 rows for
+#     2026-03-29. Use src.backtest.cutoffs' pd.date_range-based generation.
+#   - "fixed_period_count": always the nominal number of blocks (6 for a
+#     4h product), with boundaries computed as this day's local midnight +
+#     N*product_length_hours in absolute time — so the last block's END
+#     can spill past next calendar day's local midnight on a short day.
+#     Confirmed against the real regelleistung.net FCR file for March
+#     2026, which published all 6 "NEGPOS_00_04".."NEGPOS_20_24" blocks
+#     for 2026-03-29 unchanged, with the last one's parsed delivery_end
+#     landing at 2026-03-30 01:00 (not 00:00) as a result.
 
 day_ahead:
+  # NOTE: EU-wide SDAC reform moved day-ahead from hourly to 15-minute
+  # Market Time Units, live since delivery day 2025-10-01 (confirmed
+  # against EPEX SPOT's own announcement and cross-checked against real
+  # ENTSO-E data: every day-ahead price we ingested for 2026 is already
+  # quarter-hourly). The auction's gate closure stayed at 12:00 CET D-1 —
+  # only the product granularity changed (96 x 15-min blocks/day instead
+  # of 24 hourly prices) — confirmed via Modo Energy's own description of
+  # the current auction. Historical data from before 2025-10-01 is still
+  # hourly; this config describes the CURRENT product only, so a backtest
+  # spanning the transition would need per-period handling this repo
+  # doesn't attempt.
   source_column: da_price_eur_mwh
   target_column: da_price_eur_mwh
   unit: EUR/MWh
-  product_length_hours: 1
+  product_length_hours: 0.25
+  dst_convention: variable_period_count
   gate_closure_local: "12:00"
   gate_closure_offset_days: -1
   forecast_cutoff_local: "11:00"
@@ -25,6 +53,7 @@ fcr:
   target_column: fcr_price_eur_mw
   unit: EUR/MW
   product_length_hours: 4
+  dst_convention: fixed_period_count
   gate_closure_local: "08:00"
   gate_closure_offset_days: -1
   forecast_cutoff_local: "07:00"
@@ -44,6 +73,7 @@ afrr_pos:
   unit: EUR/MW
   direction: positive
   product_length_hours: 4
+  dst_convention: fixed_period_count
   gate_closure_local: "09:00"
   gate_closure_offset_days: -1
   forecast_cutoff_local: "08:00"
@@ -59,6 +89,7 @@ afrr_neg:
   unit: EUR/MW
   direction: negative
   product_length_hours: 4
+  dst_convention: fixed_period_count
   gate_closure_local: "09:00"
   gate_closure_offset_days: -1
   forecast_cutoff_local: "08:00"

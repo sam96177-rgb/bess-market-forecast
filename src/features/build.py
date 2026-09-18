@@ -27,6 +27,7 @@ import pandas as pd
 
 from src.config import MarketConfig
 from src.features.availability import (
+    calendar_day_lag_rule,
     filter_available_features,
     lag_rule,
     register_feature_availability,
@@ -34,17 +35,11 @@ from src.features.availability import (
 
 DE_HOLIDAYS = holidays_lib.Germany()
 
-# Calendar-duration lags (hours), independent of market granularity: the
-# immediate previous period, 1 day, 1 week, 4 weeks ago.
-LAG_DURATIONS_HOURS = [24, 168, 672]
-
-
-def lag_hours_for_market(market: MarketConfig) -> list[int]:
-    """The immediate-previous-period lag is one product length for this
-    market (1h for day_ahead, 4h for fcr/afrr); the calendar-duration lags
-    (1d/1w/4w) are the same across markets."""
-    hours = [market.product_length_hours] + LAG_DURATIONS_HOURS
-    return sorted(set(hours))
+# Calendar-duration lags, expressed in DAYS (not hours): 1 day, 1 week, 4
+# weeks ago — i.e. "same hour N days back". These are computed via
+# pd.DateOffset (calendar-aware), not a fixed N*24h Timedelta — see
+# add_lag_features for why a Timedelta silently breaks across DST.
+LAG_CALENDAR_DAYS = [1, 7, 28]
 
 
 def add_calendar_features(target_times: pd.Series) -> pd.DataFrame:
@@ -64,18 +59,51 @@ def add_calendar_features(target_times: pd.Series) -> pd.DataFrame:
 
 
 def add_lag_features(
-    target_times: pd.Series, target_series: pd.Series, lag_hours_list: list[int]
+    target_times: pd.Series, target_series: pd.Series, market: MarketConfig
 ) -> pd.DataFrame:
     """target_series must be indexed by delivery timestamp (the settled/
-    observed value for that period)."""
+    observed value for that period).
+
+    Two different kinds of lag, computed two different ways:
+    - The immediate-previous-period lag (one product length: 0.25h for
+      day_ahead, 4h for fcr/afrr) is a genuinely short, contiguous-time
+      gap — a fixed elapsed Timedelta is correct.
+    - "Same hour N days/weeks ago" is a CALENDAR concept, not a fixed
+      elapsed duration. Subtracting a flat N*24h Timedelta silently
+      breaks it: after a DST transition removes/adds an hour, "168 real
+      hours before this timestamp" lands on the wrong wall-clock hour,
+      which then misses every lookup against the target series (itself
+      indexed by wall-clock time) for days afterward — caught only by
+      running a real 6-month backtest across 2026-03-29. pd.DateOffset
+      shifts by calendar days instead, staying wall-clock-correct.
+    """
     lookup = target_series.to_dict()
     out = {}
-    for lag in lag_hours_list:
-        lag_name = f"lag_{lag}h"
-        lookup_times = target_times - pd.Timedelta(hours=lag)
+
+    immediate_hours = market.product_length_hours
+    immediate_name = f"lag_{immediate_hours}h"
+    out[immediate_name] = (target_times - pd.Timedelta(hours=immediate_hours)).map(lookup)
+    register_feature_availability(immediate_name, lag_rule(immediate_hours))
+
+    for n_days in LAG_CALENDAR_DAYS:
+        lag_name = f"lag_{n_days * 24}h"
+        lookup_times = _shift_calendar_days(target_times, n_days)
         out[lag_name] = lookup_times.map(lookup)
-        register_feature_availability(lag_name, lag_rule(lag))
+        register_feature_availability(lag_name, calendar_day_lag_rule(n_days))
+
     return pd.DataFrame(out, index=target_times.index)
+
+
+def _shift_calendar_days(target_times: pd.Series, n_days: int) -> pd.Series:
+    """Shift a tz-aware Series back by N calendar days. Series - DateOffset
+    raises pytz.NonExistentTimeError outright if the result lands in a
+    DST gap (e.g. 2024-03-31 02:00 in Europe/Berlin never happens) — there
+    is no `nonexistent=` handling for that operator the way tz_localize
+    has one. Fixed by dropping to naive (unambiguous calendar arithmetic),
+    shifting, then re-attaching the tz with explicit gap handling.
+    """
+    naive = target_times.dt.tz_localize(None) - pd.DateOffset(days=n_days)
+    return naive.dt.tz_localize(target_times.dt.tz, ambiguous=True, nonexistent="shift_forward")
 
 
 def join_block_mean(
@@ -110,8 +138,7 @@ def build_feature_frame(
     frame.index = target_times.index
     frame = pd.concat([frame, add_calendar_features(target_times)], axis=1)
 
-    lag_hours = lag_hours_for_market(market)
-    frame = pd.concat([frame, add_lag_features(target_times, target_series, lag_hours)], axis=1)
+    frame = pd.concat([frame, add_lag_features(target_times, target_series, market)], axis=1)
 
     if weather is not None:
         joined = join_block_mean(weather, target_times, market.product_length_hours)

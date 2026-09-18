@@ -19,7 +19,8 @@ class MarketConfig:
     source_column: str
     target_column: str
     unit: str
-    product_length_hours: int
+    product_length_hours: float  # fractional for sub-hourly products, e.g. 0.25 = 15 minutes
+    dst_convention: str  # "variable_period_count" or "fixed_period_count" — see cutoffs.py
     gate_closure_local: dt.time
     gate_closure_offset_days: int
     forecast_cutoff_local: dt.time
@@ -40,18 +41,25 @@ def load_markets_config(path: Path | None = None) -> dict[str, MarketConfig]:
 
     known_fields = {
         "source_column", "target_column", "unit", "product_length_hours",
-        "gate_closure_local", "gate_closure_offset_days", "forecast_cutoff_local",
-        "delivery_start_local", "horizons_hours", "timezone",
+        "dst_convention", "gate_closure_local", "gate_closure_offset_days",
+        "forecast_cutoff_local", "delivery_start_local", "horizons_hours", "timezone",
     }
+    valid_dst_conventions = {"variable_period_count", "fixed_period_count"}
 
     markets: dict[str, MarketConfig] = {}
     for name, cfg in raw.items():
+        dst_convention = cfg["dst_convention"]
+        if dst_convention not in valid_dst_conventions:
+            raise ValueError(
+                f"{name}: dst_convention must be one of {valid_dst_conventions}, got {dst_convention!r}"
+            )
         markets[name] = MarketConfig(
             name=name,
             source_column=cfg["source_column"],
             target_column=cfg["target_column"],
             unit=cfg["unit"],
             product_length_hours=cfg["product_length_hours"],
+            dst_convention=dst_convention,
             gate_closure_local=_parse_time(cfg["gate_closure_local"]),
             gate_closure_offset_days=cfg["gate_closure_offset_days"],
             forecast_cutoff_local=_parse_time(cfg["forecast_cutoff_local"]),

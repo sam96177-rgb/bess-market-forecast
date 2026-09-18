@@ -129,7 +129,15 @@ def _fetch_one_month(point_name: str, lat: float, lon: float, year: int, month: 
 
     hourly = payload["hourly"]
     df = pd.DataFrame(hourly)
-    df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(TIMEZONE, ambiguous="infer")
+    # ambiguous="infer": resolves the autumn fall-back hour (23:00-01:00
+    # repeats). nonexistent="shift_forward": the spring-forward transition
+    # skips a wall-clock hour outright (e.g. 2026-03-29 02:00 never
+    # happens in Europe/Berlin) — shifting it forward to 03:00 is the
+    # standard treatment, rather than raising and losing the whole month
+    # (this broke silently on every March until caught against real data).
+    df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(
+        TIMEZONE, ambiguous="infer", nonexistent="shift_forward"
+    )
     df = df.rename(columns={
         "time": "datetime",
         "temperature_2m": "temperature_2m_c",

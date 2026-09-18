@@ -32,9 +32,36 @@ def always_available(target_time: pd.Timestamp) -> pd.Timestamp:
 
 
 def lag_rule(lag_hours: float) -> AvailabilityRule:
-    """Lagged target values: available at target_time - lag."""
+    """Lagged target values: available at target_time - lag. Fixed
+    elapsed-duration lag (a real Timedelta) — correct for a short,
+    contiguous-time lag like "the immediately preceding delivery block",
+    but NOT for a calendar-duration lag like "same hour last week"; use
+    calendar_day_lag_rule for those instead."""
     def rule(target_time: pd.Timestamp) -> pd.Timestamp:
         return target_time - pd.Timedelta(hours=lag_hours)
+    return rule
+
+
+def calendar_day_lag_rule(n_days: int) -> AvailabilityRule:
+    """Calendar-duration lags ("same hour N days/weeks ago"): available at
+    target_time minus N calendar days, via pd.DateOffset (wall-clock-
+    aware), not a fixed N*24h Timedelta. The two differ whenever the
+    window spans a DST transition — a Timedelta shifts the wall-clock
+    hour by one for several days after every spring/autumn clock change,
+    which then mismatches the target series' own wall-clock-indexed
+    lookup keys and makes the feature availability rule lie about when
+    the value is really knowable. Must match src.features.build's
+    add_lag_features lookup exactly, or the two silently disagree.
+    """
+    def rule(target_time: pd.Timestamp) -> pd.Timestamp:
+        # Timestamp - DateOffset raises pytz.NonExistentTimeError outright
+        # if the result lands in a DST gap (no `nonexistent=` handling for
+        # that operator) — drop to naive, shift, then re-attach the tz
+        # with explicit gap handling, matching src.features.build's
+        # _shift_calendar_days exactly (they must agree).
+        tz = target_time.tzinfo
+        naive = target_time.tz_localize(None) - pd.DateOffset(days=n_days)
+        return naive.tz_localize(tz, ambiguous=True, nonexistent="shift_forward")
     return rule
 
 
