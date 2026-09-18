@@ -1,0 +1,68 @@
+# Declarative market definitions. Everything downstream (cutoff generation,
+# resampling granularity, UI axis labels) reads from this file. No
+# market-specific time constants may appear anywhere else in the codebase.
+#
+# `source_column` is the column name as it exists in the raw ingested data.
+# `target_column` is the clean name used everywhere downstream (feature
+# builder, backtest output, UI). Keeping the two separate lets us fix
+# misleading source naming (see afrr_pos/afrr_neg below) without touching
+# raw data, which is meant to stay immutable.
+
+day_ahead:
+  source_column: da_price_eur_mwh
+  target_column: da_price_eur_mwh
+  unit: EUR/MWh
+  product_length_hours: 1
+  gate_closure_local: "12:00"
+  gate_closure_offset_days: -1
+  forecast_cutoff_local: "11:00"
+  delivery_start_local: "00:00"
+  horizons_hours: [24, 48]
+  timezone: Europe/Berlin
+
+fcr:
+  source_column: fcr_price_eur_mw
+  target_column: fcr_price_eur_mw
+  unit: EUR/MW
+  product_length_hours: 4
+  gate_closure_local: "08:00"
+  gate_closure_offset_days: -1
+  forecast_cutoff_local: "07:00"
+  delivery_start_local: "00:00"
+  horizons_hours: [24]
+  timezone: Europe/Berlin
+  symmetric: true
+  pricing: pay_as_cleared
+
+afrr_pos:
+  # NOTE: source column is misleadingly named "_eur_mwh" in the raw file but
+  # the values are constant across every 4h block (verified in Milestone 0
+  # inventory) — this is a capacity price in EUR/MW, not an energy price.
+  # Corrected here; raw data is left as-is.
+  source_column: afrr_pos_price_eur_mwh
+  target_column: afrr_pos_capacity_eur_mw
+  unit: EUR/MW
+  direction: positive
+  product_length_hours: 4
+  gate_closure_local: "09:00"
+  gate_closure_offset_days: -1
+  forecast_cutoff_local: "08:00"
+  delivery_start_local: "00:00"
+  horizons_hours: [24]
+  timezone: Europe/Berlin
+  pricing: pay_as_bid
+
+afrr_neg:
+  # See afrr_pos note above — same mislabeling in the raw source column.
+  source_column: afrr_neg_price_eur_mwh
+  target_column: afrr_neg_capacity_eur_mw
+  unit: EUR/MW
+  direction: negative
+  product_length_hours: 4
+  gate_closure_local: "09:00"
+  gate_closure_offset_days: -1
+  forecast_cutoff_local: "08:00"
+  delivery_start_local: "00:00"
+  horizons_hours: [24]
+  timezone: Europe/Berlin
+  pricing: pay_as_bid
