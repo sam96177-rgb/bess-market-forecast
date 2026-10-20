@@ -163,3 +163,41 @@ def get_wind_and_solar_forecast(
         start_date, end_date,
     )
     return (resample_to_hourly(df) if resample else df), failures
+
+
+# ENTSO-E PSR type names (entsoe.mappings.PSRTYPE_MAPPINGS) for the three
+# renewable types query_generation's psr_type=None also returns alongside
+# every other production type (Fossil Gas, Nuclear, ...) -- filtered out
+# at fetch time so the per-month cache holds only what PLAN_V6_REVISION.md
+# V6-3 actually uses, the same way query_wind_and_solar_forecast's own
+# dedicated endpoint never returns the other types in the first place.
+_WIND_AND_SOLAR_PSR_NAMES = ["Wind Onshore", "Wind Offshore", "Solar"]
+
+
+def get_wind_and_solar_actual(
+    start_date: dt.date, end_date: dt.date, resample: bool = True
+) -> tuple[pd.DataFrame, list[str]]:
+    """Actual (realised) wind & solar generation -- PLAN_V6_REVISION.md V6-3's
+    "past input": what a model may see is bounded by
+    src/features/availability.py's after_delivery_rule, never this
+    function's date range directly, so a cutoff can only use actuals that
+    were already measured by then. Returned hourly by default (mean of the
+    native resolution) — pass resample=False for the raw series."""
+    client = _client()
+
+    def _fetch(start, end):
+        df = client.query_generation(COUNTRY_CODE, start=start, end=end, psr_type=None)
+        # query_generation returns columns as a (psr_name, flow) MultiIndex
+        # whenever a psr type has both production and pumped-storage/
+        # consumption flows (confirmed empirically: Wind Onshore and Solar
+        # both carry an "Actual Consumption" column alongside "Actual
+        # Aggregated"; Wind Offshore has only "Actual Aggregated"). Keep
+        # generation only -- "Actual Consumption" is not a feature we want,
+        # and a bare `df[["Wind Onshore", ...]]` on a MultiIndex matches
+        # EVERY flow under that name, not just generation.
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.xs("Actual Aggregated", axis=1, level=-1)
+        return df[[c for c in _WIND_AND_SOLAR_PSR_NAMES if c in df.columns]]
+
+    df, failures = fetch_series("wind_solar_actual_mw", _fetch, start_date, end_date)
+    return (resample_to_hourly(df) if resample else df), failures

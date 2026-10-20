@@ -31,27 +31,43 @@ def always_available(target_time: pd.Timestamp) -> pd.Timestamp:
     return _ALWAYS
 
 
-def lag_rule(lag_hours: float) -> AvailabilityRule:
-    """Lagged target values: available at target_time - lag. Fixed
-    elapsed-duration lag (a real Timedelta) — correct for a short,
+def _day_before_publication(lag_delivery_time: pd.Timestamp, results_published_local: dt.time) -> pd.Timestamp:
+    """PLAN_V5_REVISION.md V5-5: a lag feature's own value is an auction
+    price, published the day before ITS delivery day at the market's
+    results_published_local — not "known instantly at its own delivery
+    time" (the bug the old rule had, which made lag_24h look unavailable
+    at every reasonable cutoff)."""
+    publish_date = lag_delivery_time.date() - dt.timedelta(days=1)
+    naive = dt.datetime.combine(publish_date, results_published_local)
+    return pd.Timestamp(naive).tz_localize(lag_delivery_time.tzinfo, ambiguous=True, nonexistent="shift_forward")
+
+
+def lag_rule(lag_hours: float, results_published_local: dt.time) -> AvailabilityRule:
+    """Lagged target values: the lag itself is `lag_hours` before
+    target_time (a fixed elapsed Timedelta — correct for a short,
     contiguous-time lag like "the immediately preceding delivery block",
-    but NOT for a calendar-duration lag like "same hour last week"; use
-    calendar_day_lag_rule for those instead."""
+    NOT a calendar-duration lag like "same hour last week"; use
+    calendar_day_lag_rule for those). Available the day before THAT lag's
+    own delivery day, at results_published_local — see
+    _day_before_publication."""
     def rule(target_time: pd.Timestamp) -> pd.Timestamp:
-        return target_time - pd.Timedelta(hours=lag_hours)
+        lag_delivery_time = target_time - pd.Timedelta(hours=lag_hours)
+        return _day_before_publication(lag_delivery_time, results_published_local)
     return rule
 
 
-def calendar_day_lag_rule(n_days: int) -> AvailabilityRule:
-    """Calendar-duration lags ("same hour N days/weeks ago"): available at
-    target_time minus N calendar days, via pd.DateOffset (wall-clock-
-    aware), not a fixed N*24h Timedelta. The two differ whenever the
-    window spans a DST transition — a Timedelta shifts the wall-clock
-    hour by one for several days after every spring/autumn clock change,
-    which then mismatches the target series' own wall-clock-indexed
-    lookup keys and makes the feature availability rule lie about when
-    the value is really knowable. Must match src.features.build's
-    add_lag_features lookup exactly, or the two silently disagree.
+def calendar_day_lag_rule(n_days: int, results_published_local: dt.time) -> AvailabilityRule:
+    """Calendar-duration lags ("same hour N days/weeks ago"): the lag's own
+    delivery time is target_time minus N calendar days, via pd.DateOffset
+    (wall-clock-aware), not a fixed N*24h Timedelta. The two differ
+    whenever the window spans a DST transition — a Timedelta shifts the
+    wall-clock hour by one for several days after every spring/autumn
+    clock change, which then mismatches the target series' own wall-
+    clock-indexed lookup keys and makes the feature availability rule lie
+    about when the value is really knowable. Must match
+    src.features.build's add_lag_features lookup exactly, or the two
+    silently disagree. Available the day before that lag's own delivery
+    day, at results_published_local — see _day_before_publication.
     """
     def rule(target_time: pd.Timestamp) -> pd.Timestamp:
         # Timestamp - DateOffset raises pytz.NonExistentTimeError outright
@@ -61,7 +77,8 @@ def calendar_day_lag_rule(n_days: int) -> AvailabilityRule:
         # _shift_calendar_days exactly (they must agree).
         tz = target_time.tzinfo
         naive = target_time.tz_localize(None) - pd.DateOffset(days=n_days)
-        return naive.tz_localize(tz, ambiguous=True, nonexistent="shift_forward")
+        lag_delivery_time = naive.tz_localize(tz, ambiguous=True, nonexistent="shift_forward")
+        return _day_before_publication(lag_delivery_time, results_published_local)
     return rule
 
 
@@ -89,6 +106,21 @@ def after_delivery_rule(delivery_length_hours: float = 1) -> AvailabilityRule:
     they describe has fully elapsed — never at or before its start."""
     def rule(target_time: pd.Timestamp) -> pd.Timestamp:
         return target_time + pd.Timedelta(hours=delivery_length_hours)
+    return rule
+
+
+def lagged_actual_rule(lag_hours: float, delivery_length_hours: float = 1) -> AvailabilityRule:
+    """A column holding an OBSERVED/actual value from `lag_hours` before
+    target_time (PLAN_V6_REVISION.md V6-3's "past input": actual wind/solar
+    generation two days — lag_hours=48 — before delivery). Available once
+    that lag's own delivery period has elapsed, per after_delivery_rule —
+    anchored to the lag's own delivery time via lag_hours first, the same
+    way lag_rule anchors to the lag's own delivery time before checking
+    _day_before_publication; a bare after_delivery_rule on target_time
+    itself would check the wrong (future) slot's availability."""
+    def rule(target_time: pd.Timestamp) -> pd.Timestamp:
+        lag_delivery_time = target_time - pd.Timedelta(hours=lag_hours)
+        return lag_delivery_time + pd.Timedelta(hours=delivery_length_hours)
     return rule
 
 
@@ -162,6 +194,7 @@ def filter_available_features(
     target_times = df[target_time_col]
 
     dropped: list[str] = []
+    availability_by_rule: dict[AvailabilityRule, pd.Series] = {}  # columns sharing one rule object evaluate it once
     for col in feature_cols:
         rule = registry.get(col)
         if rule is None:
@@ -173,7 +206,9 @@ def filter_available_features(
             dropped.append(col)
             continue
 
-        available_ats = target_times.map(rule)
+        if rule not in availability_by_rule:
+            availability_by_rule[rule] = target_times.map(rule)
+        available_ats = availability_by_rule[rule]
         violations = available_ats > cutoff_time
         if violations.any():
             first_bad = violations.idxmax()

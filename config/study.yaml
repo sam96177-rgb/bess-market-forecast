@@ -1,0 +1,19 @@
+name: v8
+history_start: 2025-01-01          # ingest and train from here
+min_training_history_days: 365     # guard in run_backtest (V5-2)
+test_window:                       # delivery dates, inclusive
+  day_ahead: {start: 2026-03-21, end: 2026-09-17}
+  fcr:       {start: 2026-03-04, end: 2026-08-31}
+  afrr_pos:  {start: 2026-03-04, end: 2026-08-31}
+  afrr_neg:  {start: 2026-03-04, end: 2026-08-31}
+validation_window:                 # PLAN_V6_REVISION.md V6-4: 60 days right before each
+  # market's test_window start, scored to pick per_market_best fairly (pipeline/03_select_blend.py)
+  # -- never used for the optimizer window or any reported test-window metric.
+  day_ahead: {start: 2026-01-20, end: 2026-03-20}
+  fcr:       {start: 2026-01-03, end: 2026-03-03}
+  afrr_pos:  {start: 2026-01-03, end: 2026-03-03}
+  afrr_neg:  {start: 2026-01-03, end: 2026-03-03}
+models: [seasonal_naive, lgbm_point, linear_lags, lear]
+optimizer:                         # read only by bess-optimizer; ignored by the forecast repo
+  strategies: [day_ahead_only, full_cooptimized]
+  blends: [per_market_best]        # names from bess-optimizer/config/forecast_blends.yaml

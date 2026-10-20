@@ -39,10 +39,11 @@ metrics = compute_metrics(results, group_by=("market", "model"))
 st.subheader("Skill score vs. seasonal_naive (RMSE ratio: 1 = perfect, 0 = ties the naive baseline)")
 
 leaderboard = metrics.pivot(index="model", columns="market", values="skill_score_vs_naive")
-model_order = [
-    m for m in ["seasonal_naive", "linear_lags", "lgbm_point", "lgbm_quantile", "lgbm_quantile_tuned"]
-    if m in leaderboard.index
-]
+_PREFERRED_ORDER = ["seasonal_naive", "linear_lags", "lgbm_point"]
+# Any model outside the preferred list still shows up, after it, rather than being silently dropped.
+model_order = [m for m in _PREFERRED_ORDER if m in leaderboard.index] + sorted(
+    m for m in leaderboard.index if m not in _PREFERRED_ORDER
+)
 leaderboard = leaderboard.reindex(model_order)
 
 styled = leaderboard.style.background_gradient(cmap="RdYlGn", vmin=-0.5, vmax=1.0, axis=None).format("{:.2f}")

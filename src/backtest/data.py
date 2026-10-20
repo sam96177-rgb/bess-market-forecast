@@ -9,7 +9,7 @@ import logging
 
 import pandas as pd
 
-from src.ingest.entsoe import get_day_ahead_prices
+from src.ingest.entsoe import get_day_ahead_prices, get_wind_and_solar_actual, get_wind_and_solar_forecast
 from src.ingest.regelleistung import get_afrr_capacity_prices, get_fcr_capacity_prices
 from src.ingest.weather import get_capacity_weighted_weather
 
@@ -46,3 +46,25 @@ def load_weather(start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
     df, failures = get_capacity_weighted_weather(start_date, end_date)
     _warn_failures("weather", failures)
     return df.set_index("datetime")
+
+
+def load_wind_and_solar_forecast(start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
+    """PLAN_V6_REVISION.md V6-3's future input, indexed by delivery quarter-hour
+    (load_weather stays hourly) -- columns are ENTSO-E's own PSR type names ("Wind
+    Onshore", "Wind Offshore", "Solar"), consumed by
+    src.features.build.add_generation_features. Native 15-minute series
+    (PLAN_V7_REVISION.md V7-1): day-ahead gets one value per quarter-hour,
+    4-hour markets still get the block mean."""
+    df, failures = get_wind_and_solar_forecast(start_date, end_date, resample=False)
+    _warn_failures("wind_and_solar_forecast", failures)
+    return df
+
+
+def load_wind_and_solar_actual(start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
+    """PLAN_V6_REVISION.md V6-3's past input -- same shape as
+    load_wind_and_solar_forecast, but realised generation. Never use a row
+    here as if it were known at its own delivery time: that is exactly what
+    src.features.availability.lagged_actual_rule exists to prevent."""
+    df, failures = get_wind_and_solar_actual(start_date, end_date, resample=False)
+    _warn_failures("wind_and_solar_actual", failures)
+    return df

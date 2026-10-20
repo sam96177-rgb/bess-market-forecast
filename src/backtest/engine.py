@@ -49,12 +49,48 @@ def _git_commit() -> str | None:
         return None
 
 
+FeatureCache = dict[pd.Timestamp, tuple[pd.DataFrame, list]]
+
+
+def _cached_feature_frame(
+    cache: FeatureCache,
+    market: MarketConfig,
+    cutoff_time: pd.Timestamp,
+    target_times: pd.Series,
+    target_series: pd.Series,
+    weather: pd.DataFrame | None,
+    generation_forecast: pd.DataFrame | None = None,
+    generation_actual: pd.DataFrame | None = None,
+    generation_forecast_published_local: dt.time | None = None,
+) -> tuple[pd.DataFrame, list]:
+    """Memoizes build_feature_frame by cutoff_time (PLAN_V5_REVISION.md
+    V5-4): a cutoff's feature rows and its availability-filter drops
+    depend only on that cutoff and the market (src.backtest.cutoffs.
+    generate_cutoffs produces the identical target group for a cutoff
+    regardless of the requested date range) -- never on whether it's
+    serving a retrain's expanding training window or a test window. So
+    within one cache's lifetime a given cutoff is built at most once,
+    instead of once per retrain per model.
+    """
+    if cutoff_time not in cache:
+        cache[cutoff_time] = build_feature_frame(
+            market, cutoff_time, target_times, target_series, weather=weather,
+            generation_forecast=generation_forecast, generation_actual=generation_actual,
+            generation_forecast_published_local=generation_forecast_published_local,
+        )
+    return cache[cutoff_time]
+
+
 def _build_training_set(
     market: MarketConfig,
     target_series: pd.Series,
     weather: pd.DataFrame | None,
     train_start: dt.date,
     train_end: dt.date,
+    feature_cache: FeatureCache,
+    generation_forecast: pd.DataFrame | None = None,
+    generation_actual: pd.DataFrame | None = None,
+    generation_forecast_published_local: dt.time | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Builds (X, y) from every daily cutoff in [train_start, train_end],
     at the market's primary (shortest) horizon."""
@@ -68,7 +104,10 @@ def _build_training_set(
     frames = []
     for cutoff_time, group in cutoffs.groupby("cutoff_time"):
         target_times = group["target_window_start"]
-        features, _dropped = build_feature_frame(market, cutoff_time, target_times, target_series, weather=weather)
+        features, _dropped = _cached_feature_frame(
+            feature_cache, market, cutoff_time, target_times, target_series, weather,
+            generation_forecast, generation_actual, generation_forecast_published_local,
+        )
         frames.append(features)
     if not frames:
         return pd.DataFrame(), pd.Series(dtype=float)
@@ -89,13 +128,33 @@ def run_backtest(
     backtest_end: dt.date,
     retrain_every_days: int = RETRAIN_EVERY_DAYS,
     model_kwargs: dict | None = None,
+    min_training_history_days: int | None = None,
+    feature_cache: FeatureCache | None = None,
+    generation_forecast: pd.DataFrame | None = None,
+    generation_actual: pd.DataFrame | None = None,
+    generation_forecast_published_local: dt.time | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Walk-forward backtest for one (market, model) pair over
     [backtest_start, backtest_end] (inclusive, delivery dates). Returns
     (results_long_df, run_metadata_dict) — see module docstring for the
     results schema and src/backtest/engine.py's save_run for persistence.
+
+    `min_training_history_days` (PLAN_V5_REVISION.md V5-2): if given and
+    the first retrain window's training history is shorter than this, a
+    loud warning is logged. `first_train_days` is always recorded in the
+    metadata, guard or not.
+
+    `feature_cache` (PLAN_V5_REVISION.md V5-4): pass one in to share it
+    across several run_backtest calls for the SAME market (e.g. one per
+    model in scripts/run_backtest.py's loop) so a cutoff's feature frame
+    is built once total, not once per model. Defaults to a fresh cache
+    scoped to just this call.
+
+    `generation_forecast`/`generation_actual`/`generation_forecast_published_local`
+    (PLAN_V6_REVISION.md V6-3): see src.features.build.add_generation_features.
     """
     model_kwargs = model_kwargs or {}
+    feature_cache = {} if feature_cache is None else feature_cache
     run_id = str(uuid.uuid4())
     primary_horizon = min(market.horizons_hours)
 
@@ -108,15 +167,26 @@ def run_backtest(
     quantiles_used: list[str] = []
     n_windows_trained = 0
     n_windows_skipped = 0
+    model_diagnostics: list[dict] = []
 
     earliest_available = target_series.index.min().date()
+    first_train_days = (backtest_start - earliest_available).days
+    if min_training_history_days is not None and first_train_days < min_training_history_days:
+        logger.warning(
+            "%s/%s: first training window has only %d days of history before %s "
+            "(need >= %d; earliest available data point is %s).",
+            market.name, model_name, first_train_days, backtest_start, min_training_history_days, earliest_available,
+        )
 
     window_start = backtest_start
     while window_start <= backtest_end:
         window_end = min(window_start + dt.timedelta(days=retrain_every_days - 1), backtest_end)
         train_end = window_start - dt.timedelta(days=1)
 
-        X_train, y_train = _build_training_set(market, target_series, weather, earliest_available, train_end)
+        X_train, y_train = _build_training_set(
+            market, target_series, weather, earliest_available, train_end, feature_cache,
+            generation_forecast, generation_actual, generation_forecast_published_local,
+        )
 
         if len(X_train) < MIN_TRAIN_ROWS:
             logger.warning(
@@ -130,6 +200,8 @@ def run_backtest(
         model = get_model(model_name, **model_kwargs)
         model.fit(X_train, y_train)
         n_windows_trained += 1
+        if hasattr(model, "diagnostics"):
+            model_diagnostics.append({"window_start": str(window_start), **model.diagnostics()})
 
         # Sliced by DELIVERY day (target_window_start), not cutoff_time's
         # own date — a cutoff is dated D-1 (or earlier) relative to the
@@ -145,7 +217,10 @@ def run_backtest(
             target_times = group["target_window_start"]
             horizon_by_target = group.set_index("target_window_start")["horizon_step"]
 
-            X_test, dropped = build_feature_frame(market, cutoff_time, target_times, target_series, weather=weather)
+            X_test, dropped = _cached_feature_frame(
+                feature_cache, market, cutoff_time, target_times, target_series, weather,
+                generation_forecast, generation_actual, generation_forecast_published_local,
+            )
             dropped_features_seen.update(dropped)
             kept_features_seen.update(c for c in X_test.columns if c != "target_time")
 
@@ -184,7 +259,9 @@ def run_backtest(
         "retrain_every_days": retrain_every_days,
         "n_windows_trained": n_windows_trained,
         "n_windows_skipped": n_windows_skipped,
+        "first_train_days": first_train_days,
         "quantiles": quantiles_used,
+        "model_diagnostics": model_diagnostics,
         "kept_features": sorted(kept_features_seen),
         "dropped_features": sorted(dropped_features_seen),
         "data_version": {

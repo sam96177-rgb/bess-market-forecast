@@ -38,5 +38,6 @@ class ForecastModel(Protocol):
 
 def select_feature_columns(X: pd.DataFrame) -> pd.DataFrame:
     """Every model excludes target_time — it's metadata for joining back
-    to results, never a predictor."""
-    return X[[c for c in X.columns if c != "target_time"]]
+    to results, never a predictor. The `lear_p_*` price-history block belongs to the
+    `lear` model alone (PLAN_V8_REVISION.md V8-4): the other models keep their V7 inputs."""
+    return X[[c for c in X.columns if c != "target_time" and not c.startswith("lear_p_")]]

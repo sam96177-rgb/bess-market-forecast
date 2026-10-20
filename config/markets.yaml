@@ -24,6 +24,22 @@
 #     for 2026-03-29 unchanged, with the last one's parsed delivery_end
 #     landing at 2026-03-30 01:00 (not 00:00) as a result.
 
+# ASSUMPTION (PLAN_V6_REVISION.md V6-3): ENTSO-E's Transparency Platform
+# regulation only guarantees the day-ahead wind/solar generation forecast
+# ([14.1.D]) is published "no later than 18:00 Brussels time, one day before
+# actual delivery" (see src/features/availability.py's daily_publication_rule
+# docstring for the verified text) -- which is AFTER every one of this
+# system's four forecast cutoffs (day_ahead 11:00, fcr 07:00, afrr 08:00, all D-1).
+# The user chose to use the forecast as a feature anyway, on the assumption
+# that ENTSO-E in practice publishes it earlier than the regulatory deadline.
+# This key is that assumption, made explicit and visible rather than a
+# silently different cutoff baked into src/features/build.py. It is recorded
+# in every run's metadata (kept_features/dropped_features) and surfaced in
+# the bess-optimizer dashboard's assumptions box.
+# Real replacement: observe ENTSO-E's actual publication times for this
+# document over a few weeks and set this to the measured value.
+entsoe_generation_forecast_published_local: "07:00"
+
 day_ahead:
   # NOTE: EU-wide SDAC reform moved day-ahead from hourly to 15-minute
   # Market Time Units, live since delivery day 2025-10-01 (confirmed
@@ -47,6 +63,12 @@ day_ahead:
   delivery_start_local: "00:00"
   horizons_hours: [24, 48]
   timezone: Europe/Berlin
+  # PLAN_V5_REVISION.md V5-5: when a lagged auction price is actually known
+  # (not at its own delivery time -- it's an auction price, published the
+  # day before). EPEX SPOT SDAC Final Market Coupling Results publish at
+  # 12:57 CET (epexspot.com "SDAC Timings and Market Messages", retrieved
+  # 2026-09-23); rounded up to 13:00 for a safety margin.
+  results_published_local: "13:00"
 
 fcr:
   source_column: fcr_price_eur_mw
@@ -62,6 +84,11 @@ fcr:
   timezone: Europe/Berlin
   symmetric: true
   pricing: pay_as_cleared
+  # ASSUMPTION (PLAN_V5_REVISION.md V5-5): regelleistung.net's exact result-
+  # publication time could not be confirmed (retrieved 2026-09-23) -- using
+  # gate closure (08:00) + 2h. lag_24h's ~22h margin makes the exact value
+  # irrelevant to whether it clears the cutoff.
+  results_published_local: "10:00"
 
 afrr_pos:
   # NOTE: source column is misleadingly named "_eur_mwh" in the raw file but
@@ -81,6 +108,9 @@ afrr_pos:
   horizons_hours: [24]
   timezone: Europe/Berlin
   pricing: pay_as_bid
+  # ASSUMPTION (PLAN_V5_REVISION.md V5-5): see fcr's results_published_local
+  # note -- unconfirmed, using gate closure (09:00) + 2h.
+  results_published_local: "11:00"
 
 afrr_neg:
   # See afrr_pos note above — same mislabeling in the raw source column.
@@ -97,3 +127,6 @@ afrr_neg:
   horizons_hours: [24]
   timezone: Europe/Berlin
   pricing: pay_as_bid
+  # ASSUMPTION (PLAN_V5_REVISION.md V5-5): see fcr's results_published_local
+  # note -- unconfirmed, using gate closure (09:00) + 2h.
+  results_published_local: "11:00"

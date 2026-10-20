@@ -22,6 +22,8 @@ def _synthetic_frame(n=200, seed=0):
         "hour_of_day": hour_of_day,
         "lag_168h": lag_168h,
         "lag_672h": lag_168h + rng.normal(0, 0.5, n),
+        "day_of_week": target_time.dayofweek,
+        "lear_p_d1_s00": lag_168h + rng.normal(0, 1, n),  # the price-history block only `lear` reads
     })
     y = pd.Series(lag_168h + rng.normal(0, 0.5, n), index=X.index)
     return X, y
@@ -34,8 +36,7 @@ def test_model_conforms_to_interface(model_name):
     X_train, y_train = X.iloc[:n_train], y.iloc[:n_train]
     X_test = X.iloc[n_train:]
 
-    kwargs = {"n_trials": 3} if model_name == "lgbm_quantile_tuned" else {}
-    model = get_model(model_name, **kwargs)
+    model = get_model(model_name)
 
     assert isinstance(model.name, str)
     assert isinstance(model.supports_quantiles, bool)
@@ -49,20 +50,6 @@ def test_model_conforms_to_interface(model_name):
         assert set(preds.columns) >= {"0.05", "0.5", "0.95"}
     else:
         assert list(preds.columns) == ["0.5"]
-
-
-def test_quantiles_are_reasonably_monotonic_for_lgbm_quantile():
-    X, y = _synthetic_frame(n=400)
-    X_train, y_train = X.iloc[:300], y.iloc[:300]
-    X_test = X.iloc[300:]
-
-    model = get_model("lgbm_quantile")
-    model.fit(X_train, y_train)
-    preds = model.predict(X_test)
-
-    # Quantile crossing can happen with independently-fit models, but on
-    # average the median should sit between the 5th and 95th percentile.
-    assert preds["0.05"].mean() <= preds["0.5"].mean() <= preds["0.95"].mean()
 
 
 def test_seasonal_naive_is_exactly_the_lag_168h_column():
@@ -82,14 +69,6 @@ def test_seasonal_naive_raises_clearly_when_lag_168h_missing():
     model.fit(X_missing, y)
     with pytest.raises(ValueError, match="lag_168h"):
         model.predict(X_missing)
-
-
-def test_lgbm_quantile_tuned_selects_a_subset_of_lag_columns():
-    X, y = _synthetic_frame(n=300)
-    model = get_model("lgbm_quantile_tuned", n_trials=5, random_state=1)
-    model.fit(X.iloc[:250], y.iloc[:250])
-    assert model.selected_columns is not None
-    assert all(c in X.columns for c in model.selected_columns)
 
 
 def test_unknown_model_name_raises_with_registered_list():

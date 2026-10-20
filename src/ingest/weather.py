@@ -129,14 +129,23 @@ def _fetch_one_month(point_name: str, lat: float, lon: float, year: int, month: 
 
     hourly = payload["hourly"]
     df = pd.DataFrame(hourly)
-    # ambiguous="infer": resolves the autumn fall-back hour (23:00-01:00
-    # repeats). nonexistent="shift_forward": the spring-forward transition
-    # skips a wall-clock hour outright (e.g. 2026-03-29 02:00 never
-    # happens in Europe/Berlin) — shifting it forward to 03:00 is the
-    # standard treatment, rather than raising and losing the whole month
-    # (this broke silently on every March until caught against real data).
+    # Open-Meteo's "timezone=Europe/Berlin" hourly series always returns
+    # exactly 24 rows/day (verified against the real API for 2025-10-25..27,
+    # PLAN_V5_REVISION.md V5-4 backfill), never 25 -- it does NOT repeat the
+    # autumn fall-back hour the way a genuine DST-aware wall clock would, so
+    # there is nothing for ambiguous="infer" to infer from (it needs to see
+    # both occurrences) and raises outright. ambiguous=False (ASSUMPTION:
+    # treat the single 02:00-02:59 row as the later, post-transition/
+    # standard-time instant, not the earlier DST one) picks a fixed side
+    # instead — a ~1h label uncertainty on a soft weather covariate, not a
+    # settlement price, so the exact side is low-stakes.
+    # nonexistent="shift_forward": the spring-forward transition skips a
+    # wall-clock hour outright (e.g. 2026-03-29 02:00 never happens in
+    # Europe/Berlin) — shifting it forward to 03:00 is the standard
+    # treatment, rather than raising and losing the whole month (this broke
+    # silently on every March until caught against real data).
     df["time"] = pd.to_datetime(df["time"]).dt.tz_localize(
-        TIMEZONE, ambiguous="infer", nonexistent="shift_forward"
+        TIMEZONE, ambiguous=False, nonexistent="shift_forward"
     )
     df = df.rename(columns={
         "time": "datetime",

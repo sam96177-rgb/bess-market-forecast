@@ -79,3 +79,27 @@ def test_lag_names_and_availability_are_registered_consistently():
 
     for name in ["lag_0.25h", "lag_24h", "lag_168h", "lag_672h"]:
         assert name in FEATURE_AVAILABILITY, f"{name} should have been registered by add_lag_features"
+
+
+def test_lag_24h_clears_every_markets_real_cutoff():
+    """PLAN_V5_REVISION.md V5-5's actual claim: with the new publication-
+    based rule and each market's real config/markets.yaml
+    results_published_local, lag_24h is available at that market's own
+    forecast_cutoff_local -- for every one of the 4 markets, not just
+    day_ahead."""
+    from src.features.availability import FEATURE_AVAILABILITY
+
+    delivery_day = dt.date(2026, 6, 3)  # ordinary day, no DST nearby
+    for market_name, market in MARKETS.items():
+        series = load_target_series(market_name, delivery_day - dt.timedelta(days=60), delivery_day)
+        target_time = pd.Timestamp.combine(delivery_day, market.delivery_start_local).tz_localize(market.timezone)
+        target_times = pd.Series([target_time])
+        add_lag_features(target_times, series, market)
+
+        cutoff_date = delivery_day + dt.timedelta(days=market.gate_closure_offset_days)
+        cutoff = pd.Timestamp.combine(cutoff_date, market.forecast_cutoff_local).tz_localize(market.timezone)
+
+        available_at = FEATURE_AVAILABILITY["lag_24h"](target_time)
+        assert available_at <= cutoff, (
+            f"{market_name}: lag_24h available at {available_at}, after its own cutoff {cutoff}"
+        )

@@ -5,9 +5,8 @@ changes to the backtest engine or UI.
 from __future__ import annotations
 
 from src.models.base import ForecastModel
+from src.models.lear import LEAR
 from src.models.lgbm_point import LGBMPoint
-from src.models.lgbm_quantile import LGBMQuantile
-from src.models.lgbm_quantile_tuned import LGBMQuantileTuned
 from src.models.linear_lags import LinearLags
 from src.models.seasonal_naive import SeasonalNaive
 
@@ -15,8 +14,7 @@ MODEL_REGISTRY: dict[str, type] = {
     "seasonal_naive": SeasonalNaive,
     "linear_lags": LinearLags,
     "lgbm_point": LGBMPoint,
-    "lgbm_quantile": LGBMQuantile,
-    "lgbm_quantile_tuned": LGBMQuantileTuned,
+    "lear": LEAR,
 }
 
 
