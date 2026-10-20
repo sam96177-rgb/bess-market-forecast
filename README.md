@@ -1,174 +1,131 @@
-# bess-market-forecast
+# German power and balancing price forecasting for battery storage
 
-German BESS market forecasting system: per-market probabilistic price
-forecasts for Day-Ahead (DE-LU), FCR, and aFRR capacity, plus a Streamlit
-monitoring UI comparing methods across markets. Tree models and
-statistical baselines only — no deep learning.
+This project forecasts the four German market prices a battery energy storage system (BESS)
+earns from: the **day-ahead** energy price and the capacity prices of three balancing reserves,
+**FCR**, **aFRR+** and **aFRR-**. Each forecast is made the day before delivery, at the time a
+battery operator would have to place its bids, and uses only data that was published by then.
+Four models are compared against a simple baseline in a six-month walk-forward backtest.
 
-This build stops at reliable forecasts + monitoring. No battery model, no
-dispatch optimisation — see "Explicitly out of scope" below.
+The forecasts are used by the companion repository
+[bess-optimizer](https://github.com/sam96177-rgb/bess-optimizer), which plans a battery on them
+and measures how much revenue each forecast model actually earns.
 
-## Setup
+## Results
+
+The baseline, `seasonal_naive`, copies the price of the same period one week earlier.
+Error is RMSE (root mean squared error), on the delivery periods every model forecast.
+
+| Market | Baseline | `linear_lags` | `lgbm_point` | `lear` | Best vs baseline |
+|---|---|---|---|---|---|
+| Day-ahead (EUR/MWh, 15 min) | 62.8 | 40.4 | **36.4** | 39.6 | 42% lower |
+| FCR (EUR/MW, 4 h block) | 45.5 | **25.5** | 27.5 | 26.1 | 44% lower |
+| aFRR+ (EUR/MW, 4 h block) | 9.8 | 6.9 | 6.4 | **5.7** | 42% lower |
+| aFRR- (EUR/MW, 4 h block) | 13.8 | **7.5** | 10.7 | 7.5 | 46% lower |
+
+Test window: 21 March to 17 September 2026 for day-ahead, 4 March to 31 August 2026 for the
+reserves.
+
+![Day-ahead price and forecasts for one week in June 2026](docs/figures/day_ahead_sample_week.png)
+
+- Every model beats the baseline in every market. On day-ahead, gradient-boosted trees
+  (`lgbm_point`) are best; on the reserve markets the linear models are best.
+- Lower error does not always mean more battery revenue. In the
+  [bess-optimizer](https://github.com/sam96177-rgb/bess-optimizer) study,
+  `lear` had the second-lowest day-ahead error but earned the least from day-ahead trading,
+  because it placed the daily highs and lows at the wrong times.
+- Limits: one six-month test period, point forecasts only, no significance test between the
+  trained models.
+
+## Quickstart
+
+Needs Python (tested with 3.13) and a free ENTSO-E API key: register on the
+[Transparency Platform](https://transparency.entsoe.eu/) and create a "Web Api Security Token"
+in your account settings.
 
 ```bash
-python -m venv venv
-source venv/Scripts/activate   # Windows Git Bash; venv\Scripts\activate.bat on cmd
+python -m venv .venv
+.venv\Scripts\activate                     # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env           # then fill in ENTSOE_API_KEY
+copy .env.example .env                     # macOS/Linux: cp; then add your key to .env
 ```
-
-Get an ENTSO-E API key from the [Transparency Platform](https://transparency.entsoe.eu/) (account settings → "Web Api Security Token"). regelleistung.net and Open-Meteo need no key.
-
-## Running
 
 ```bash
-make ingest      # download & cache raw data (data/raw/, gitignored)
-make backtest    # walk-forward backtest, all markets x all models -> results/
-make app         # streamlit run app/streamlit_app.py
-make all         # all three, in order
-make test        # pytest tests/
+python scripts/run_ingest.py               # 1. download the data (cached in data/raw/)
+python scripts/run_backtest.py             # 2. backtest all markets and models (~25 min)
+python scripts/make_readme_figures.py      # 3. print the results table, draw the figure
+streamlit run app/streamlit_app.py         # 4. explore the forecasts in a dashboard
+pytest tests/ -q                           # tests (no network or key needed)
 ```
 
-**No GNU Make on your machine?** (plain Windows without MinGW/choco/scoop)
-Run the same three steps directly:
+For a quick first run, limit the backtest, for example
+`python scripts/run_backtest.py --markets fcr --models seasonal_naive linear_lags`.
+Your API key stays in `.env`, which git ignores.
 
-```bash
-python scripts/run_ingest.py
-python scripts/run_backtest.py
-streamlit run app/streamlit_app.py
-```
-
-By default, `run_ingest.py`/`run_backtest.py` cover the **most recent 60
-days**, not the full historical range — fetching years of data against
-three live external APIs on a first `make ingest` would be a multi-hour,
-easy-to-fail operation, not something that should happen silently. Pass
-`--start`/`--end` (YYYY-MM-DD) for a full backfill, e.g.:
-
-```bash
-python scripts/run_ingest.py --start 2024-01-01 --end 2024-12-31
-python scripts/run_backtest.py --start 2024-01-01 --end 2024-12-31 --markets day_ahead --models lgbm_quantile
-```
-
-## Repo structure
+## How it works
 
 ```
-config/markets.yaml    per-market gate closure / cutoff / product config — the
-                        single source of truth every timing decision reads from
-data/raw/               immutable cached downloads (gitignored)
-data/processed/         intermediate feature artifacts (gitignored)
-src/ingest/             ENTSO-E, regelleistung.net, Open-Meteo clients
-src/features/           availability enforcement + feature builder
-src/backtest/           cutoff generation + walk-forward engine
-src/models/             model registry (ForecastModel implementations)
-src/evaluation/         point + probabilistic metrics
-app/                    Streamlit monitoring UI
-results/                backtest output (parquet + JSON sidecar, gitignored)
-scripts/                CLI entry points for make targets
-tests/                  pytest suite (all synthetic/fast except where noted)
+ ENTSO-E, regelleistung.net, Open-Meteo
+          |  src/ingest/          download and cache prices, generation, weather forecasts
+          v
+ feature builder                  past prices, calendar, weather, wind/solar forecast
+          |  src/features/
+          v
+ availability filter              drops any input not yet published at the forecast time
+          |
+          v
+ walk-forward backtest            for each delivery day: build inputs at the cutoff,
+          |  src/backtest/        predict; retrain every 91 days on all earlier data
+          v
+ models (one interface)           seasonal_naive, linear_lags, lgbm_point, lear
+          |  src/models/
+          v
+ results/*.parquet                one row per delivery period: forecast and real price
+          |
+          +--> scripts/make_readme_figures.py   benchmark table and figure
+          +--> app/                              Streamlit dashboard
 ```
 
-## Market cutoff logic
+**Timing.** Each market has a forecast time one hour before its auction closes, all on the day
+before delivery: day-ahead 11:00, FCR 07:00, aFRR 08:00. These times, and when each data
+source is published, are set in one file, `config/markets.yaml`.
 
-Every market's timing lives in `config/markets.yaml` and nowhere else —
-`src/backtest/cutoffs.py` (cutoff generation) and `src/features/availability.py`
-(feature availability) both read it; a test
-(`tests/test_backtest_no_hardcoded_timestamps.py`) fails the build if a
-market-specific clock time ever gets hard-coded into `src/backtest`
-instead.
+**No look-ahead.** Every input has a rule for when its value becomes known. Example: for
+delivery on Wednesday at 15:00, the day-ahead forecast is made on Tuesday at 11:00. Tuesday's
+prices are known (published Monday 13:00), so "same quarter-hour yesterday" is allowed;
+anything measured on Tuesday afternoon is not. The filter applies to training data too.
 
-| Market | Gate closure (D-1) | Forecast cutoff (D-1) | Product |
-|---|---|---|---|
-| `day_ahead` | 12:00 | 11:00 | 1h (24 targets/day) |
-| `fcr` | 08:00 | 07:00 | 4h block (6 targets/day) |
-| `afrr_pos` / `afrr_neg` | 09:00 | 08:00 | 4h block (6 targets/day) |
+**Models.**
 
-The forecast cutoff is always set 1h before gate closure — the last
-moment a forecast could realistically inform a bid.
+| Model | Idea |
+|---|---|
+| `seasonal_naive` | Same period one week earlier (the baseline). |
+| `linear_lags` | Ridge regression on past prices, calendar, weather and wind/solar forecast. |
+| `lgbm_point` | LightGBM gradient-boosted trees on the same inputs. |
+| `lear` | LEAR (Lago et al., 2021): one LASSO regression per period of the day, fed with the full price profile of 1, 2, 3 and 7 days earlier. |
 
-**This determines which features are even legal to use**, not just when
-the forecast runs. `src/features/availability.py` gives every feature an
-`available_at(target_time)` rule and drops (loudly, logged) anything not
-knowable by the cutoff. Two consequences that fell out of this, not put
-in by hand:
+A new model is one class with `fit(X, y)` and `predict(X)` (`src/models/base.py`) plus one line
+in `src/models/registry.py`; the backtest and dashboard pick it up from there.
 
-- A `lag_1h` feature (previous hour's actual price) is **never** usable
-  for `day_ahead`, because even the very first hour of the delivery day
-  is still 13h ahead of the 11:00 D-1 cutoff — "yesterday's last hour"
-  hasn't happened yet when the forecast is made.
-- ENTSO-E's day-ahead load/wind/solar forecasts publish D-1 18:00
-  (verified against the Transparency Platform's own regulation text) —
-  *after* every market's cutoff here. They are ingested (`src/ingest/entsoe.py`)
-  but deliberately not wired into the feature builder, since they'd be
-  dropped on every single call.
+**Study settings.** History start, test windows and the model list are in
+`config/study.yaml`. A 60-day validation window before each test window is used for choosing
+between models, so the test window is never used for any choice.
 
-FCR and aFRR build features directly at their native 4h block granularity
-(never hourly-then-averaged) — a "1 period ago" lag means the previous 4h
-block, not the previous hour.
+**Data sources.** ENTSO-E Transparency Platform (day-ahead prices, wind and solar generation),
+regelleistung.net (FCR and aFRR auction results), Open-Meteo historical forecast API (weather
+forecasts as issued at the time). One assumption to note: ENTSO-E only guarantees the
+wind/solar forecast by 18:00 the day before; this project assumes it is available by 07:00.
 
-## Adding a new model
+## Status and next steps
 
-1. Create `src/models/your_model.py` implementing the `ForecastModel`
-   interface (`src/models/base.py`):
+Working and tested (103 tests). The forecasts feed the battery optimiser in
+[bess-optimizer](https://github.com/sam96177-rgb/bess-optimizer), which turns them into charge,
+discharge and reserve bids. Next:
 
-   ```python
-   class YourModel:
-       name = "your_model"
-       supports_quantiles = False  # or True
+- forecast the timing of daily highs and lows better, since that is what a battery is paid for;
+- add uncertainty bands (quantile forecasts) for risk-aware bidding;
+- test on a longer period.
 
-       def fit(self, X: pd.DataFrame, y: pd.Series) -> None: ...
-       def predict(self, X: pd.DataFrame, quantiles=None) -> pd.DataFrame:
-           ...  # returns a DataFrame indexed like X, one column per quantile
-           # (point models: a single "0.5" column)
-   ```
+## Licence
 
-   `X` has already passed the availability filter — every column is
-   legal to use for whatever cutoff it was built at. Exclude
-   `target_time` (metadata, not a feature) via
-   `src.models.base.select_feature_columns`.
-
-2. Register it in `src/models/registry.py`'s `MODEL_REGISTRY` dict.
-
-No changes to `src/backtest/engine.py` or `app/` are needed — both only
-ever go through the registry.
-
-## Testing
-
-```bash
-pytest tests/ -q
-```
-
-All 39 tests are fast/synthetic except where the milestone explicitly
-called for checking real behavior (e.g. verifying ENTSO-E/regelleistung
-endpoint formats against the live services during development) — those
-checks aren't in the permanent suite, by design, so `pytest` never needs
-network access or API keys to pass.
-
-## Findings from the current backtest (day_ahead + fcr, Jan 2024)
-
-- **Which model wins depends on the market**, not just on model
-  complexity. On `day_ahead`, every model beats `seasonal_naive`, and
-  `lgbm_quantile`/`lgbm_quantile_tuned` win clearly (skill score vs. naive
-  ≈ 0.52–0.54). On `fcr`, the ranking partially inverts: `linear_lags`
-  (skill −0.45) and `lgbm_point` (skill −0.03) are actually *worse* than
-  the naive "same block last week" baseline. FCR capacity prices are much
-  more autocorrelated/flat than day-ahead energy prices, and with only
-  ~84 test rows a simple naive lookup is a genuinely hard baseline to
-  beat — throwing a bigger model at a market doesn't automatically help.
-- **The quantile intervals are miscalibrated**, and this only shows up if
-  you check coverage rather than RMSE. `lgbm_quantile` on `day_ahead` has
-  RMSE-based skill of ~0.54 (looks good), but its 50%/80%/90% intervals'
-  *empirical* coverage is ~24%/47%/58% — well below nominal at every
-  level. The model is meaningfully overconfident: its intervals are too
-  narrow for how often reality actually falls outside them. This is
-  exactly the failure mode Milestone 6 was built to catch, and it's
-  visible immediately on the Calibration page's reliability diagram
-  (points sit well below the diagonal) — a bidding decision based on
-  this model's stated uncertainty would be riskier than it looks.
-
-## Explicitly out of scope
-
-No battery model, no dispatch optimisation, no revenue stacking, no
-market-selection logic. The backtest output schema (`results/*.parquet`)
-is deliberately long-format and indexed by delivery period + quantile
-specifically so a future battery optimiser could consume it directly —
-that layer isn't built here.
+View-only: you may read the code and run it unchanged to evaluate it, but not modify, reuse or
+redistribute it. See [LICENSE](LICENSE).

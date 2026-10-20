@@ -28,8 +28,9 @@ code).
   retrain, expanding training window, long-format output
   (`market, model, run_id, cutoff_time, target_time, horizon_step, quantile, y_pred, y_true`).
 - **5 models** (`src/models/`): `seasonal_naive`, `linear_lags`,
-  `lgbm_point`, `lgbm_quantile` (native per-quantile LightGBM),
-  `lgbm_quantile_tuned` (Optuna-tuned).
+  `lgbm_point`, and (added in optimizer plan v3) `naive_level_adjusted` and
+  `analog_day`. `lgbm_quantile` / `lgbm_quantile_tuned` were removed in v3
+  (recoverable from git; Optuna dropped from requirements).
 - **Evaluation** (`src/evaluation/metrics.py`): RMSE/MAE, skill score vs.
   naive, pinball loss, interval coverage, Winkler score.
 - **Streamlit UI** (`app/`): Overview, Forecast Inspector, Error Analysis,
@@ -39,7 +40,7 @@ code).
   4h blocks) get duplicated onto day-ahead's native 15-min grid, output-only
   — never fed back into training/evaluation, since the models are and
   should stay scored at native resolution.
-- 55 tests passing.
+- 69 tests passing.
 
 ### Real bugs found & fixed getting a trustworthy 6-month backtest
 A short test window hid these; the real 6-month range crossed the
@@ -71,8 +72,10 @@ Skill score vs. `seasonal_naive` (`1 - rmse_model/rmse_naive`; positive = beats 
 | seasonal_naive | 0.000 | 0.000 | 0.000 | 0.000 |
 | linear_lags | −0.513 | 0.065 | −0.163 | −0.325 |
 | lgbm_point | −0.340 | 0.103 | 0.069 | −0.310 |
-| lgbm_quantile | −0.556 | 0.072 | 0.099 | −0.379 |
-| lgbm_quantile_tuned | −0.509 | 0.058 | **0.124** | −0.406 |
+| naive_level_adjusted | −0.285 | 0.014 | **0.146** | −0.050 |
+| analog_day | −0.306 | −0.141 | 0.040 | −0.151 |
+| ~~lgbm_quantile~~ (removed) | −0.556 | 0.072 | 0.099 | −0.379 |
+| ~~lgbm_quantile_tuned~~ (removed) | −0.509 | 0.058 | 0.124 | −0.406 |
 
 **Key findings**:
 - LightGBM models beat naive on day-ahead (best: 0.124) and marginally on
@@ -83,7 +86,16 @@ Skill score vs. `seasonal_naive` (`1 - rmse_model/rmse_naive`; positive = beats 
 - Quantile intervals are meaningfully overconfident everywhere (e.g.
   day-ahead's measured 50%/80% coverage: 32%/59% vs. nominal 50%/80%).
 
-## 3. New direction (this is what the next planning chat should focus on)
+## 3. Optimizer: BUILT (historical planning notes below)
+
+> The battery optimizer, the forecaster connection and the combined dashboard
+> now exist in the sibling repo `../bess-optimizer` (see its README and
+> `PLAN_V3_REVISION.md`). It reads this repo's `results/*.parquet` read-only.
+> Nothing in this repo writes anything for it, so the handoff is a convention
+> (a relative path), not a contract. The text below is the original plan and
+> is kept for context only.
+
+### Original direction
 
 > "Show the result, then build a battery optimizer for trading in
 > multi-market. Later connect the forecaster and optimizer, and visualize

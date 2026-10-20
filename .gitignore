@@ -1,4 +1,5 @@
 venv/
+.venv/
 .env
 __pycache__/
 *.pyc
@@ -8,6 +9,7 @@ data/processed/*
 results/*.parquet
 results/*.json
 results_15min/
+results_archive/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !results/.gitkeep
